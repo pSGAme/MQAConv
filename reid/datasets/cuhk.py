@@ -2,8 +2,11 @@ from __future__ import print_function, absolute_import
 import os.path as osp
 from glob import glob
 import re
-
+import sys
+print(sys.path)
 #root = /data1/ckx/data/cuhk03_np
+from QAConv.reid.datasets import  create
+
 
 class CUHK(object):
 
@@ -52,3 +55,10 @@ class CUHK(object):
               .format(self.num_query_ids, len(self.query)))
         print("  gallery  | {:5d} | {:8d}"
               .format(self.num_gallery_ids, len(self.gallery)))
+
+if __name__ == '__main__':
+    data_dir = "/data1/ckx/data"
+    name = "duke"
+    root = osp.join(data_dir, name)
+    dataset = create(name, root)
+    #print(dataset.train)

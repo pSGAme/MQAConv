@@ -8,7 +8,7 @@ from .randperson import RandPerson
 __factory = {
     'market': Market,
     'market1501': Market,
-    'duke': Duke,
+    'dukemtmc': Duke,
     'cuhk03_np_labeled': CUHK,
     'cuhk03_np_detected': CUHK,
     'cuhk03_np': CUHK,

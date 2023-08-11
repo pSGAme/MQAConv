@@ -320,8 +320,8 @@ if __name__ == '__main__':
                              "parameters it is 10 times smaller than this. Default: 0.005.")
     # training configurations
     parser.add_argument('--seed', type=int, default=0) # 42 is the birth of the universe :)
-    parser.add_argument('--epochs', type=int, default=27, help="the number of training epochs, default: 15")
-    parser.add_argument('--step_size', type=int, default=6, help="step size for the learning rate decay, default: 10")
+    parser.add_argument('--epochs', type=int, default=15, help="the number of training epochs, default: 15")
+    parser.add_argument('--step_size', type=int, default=10, help="step size for the learning rate decay, default: 10")
     parser.add_argument('--resume', type=str, default='', metavar='PATH',
                         help="Path for resuming training. Choices: '' (new start, default), "
                              "'ori' (original path), or a real path")

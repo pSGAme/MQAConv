@@ -8,7 +8,7 @@ from .evaluation_metrics import cmc, mean_ap
 def extract_cnn_feature(model, inputs):
     model = model.eval()
     with torch.inference_mode():
-        outputs = model(inputs)
+        outputs = model(inputs.cuda())
     return outputs
 
 def extract_features(model, data_loader, verbose=False):

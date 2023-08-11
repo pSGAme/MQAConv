@@ -4,6 +4,7 @@ import os.path as osp
 from PIL import Image
 from collections import defaultdict
 
+from torch.utils.data import DataLoader, Dataset
 
 class Preprocessor(object):
     def __init__(self, dataset, root=None, transform=None):
@@ -40,3 +41,7 @@ class Preprocessor(object):
         if self.transform is not None:
             img = self.transform(img)
         return img, fname, pid, sorted(set(self.pid_cam[pid])).index(camid)
+
+
+
+
