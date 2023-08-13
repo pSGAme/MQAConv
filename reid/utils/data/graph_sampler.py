@@ -126,7 +126,7 @@ class GraphSampler(Sampler):
 
     def __len__(self):
         if self.sam_index is None:
-            return self.num_pids
+            return self.num_pids * self.batch_size
         else:
             return len(self.sam_index)
 

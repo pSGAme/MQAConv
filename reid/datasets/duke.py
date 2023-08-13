@@ -2,14 +2,17 @@ from __future__ import print_function, absolute_import
 import os.path as osp
 from glob import glob
 import re
-
+# import  sys
+# print(sys.path)
+# sys.path.insert(0,"/home/ckx/QAconv/")
 # root = /data1/ckx/data/dukemtmc
 
 class Duke(object):
+    dataset_dir = "DukeMTMC-reID"
 
     def __init__(self, root, combine_all=False):
         assert (not combine_all)
-        self.images_dir = osp.join(root)
+        self.images_dir = osp.join(root, self.dataset_dir)
         self.train_path = 'bounding_box_train'
         self.gallery_path = 'bounding_box_test'
         self.query_path = 'query'
@@ -57,3 +60,10 @@ class Duke(object):
               .format(self.num_query_ids, len(self.query)))
         print("  gallery  | {:5d} | {:8d}"
               .format(self.num_gallery_ids, len(self.gallery)))
+
+if __name__ == '__main__':
+    data_dir = "/data1/ckx/data"
+    name = "dukemtmc"
+    root = osp.join(data_dir, name)
+    dataset = Duke(root)
+    #print(dataset.train)

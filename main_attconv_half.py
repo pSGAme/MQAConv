@@ -1,14 +1,14 @@
 from __future__ import print_function, absolute_import
 import argparse
 import os.path as osp
+import sys
 import string
 import time
 import json
-import random
-
 import torch
 from torch.backends import cudnn
 import numpy as np
+import scipy.io as sio
 
 from torch import nn
 from torch.utils.data import DataLoader
@@ -21,13 +21,13 @@ from reid.models.transmatcher import TransMatcher
 from reid.models import resmap
 from reid.models.qaconv import QAConv
 from reid.trainers import Trainer
-from reid.evaluators import Evaluator
+from reid.evaluators_half import Evaluator
 from reid.utils.data import transforms as T
 from reid.utils.data.preprocessor import Preprocessor
 from reid.utils.logging import Logger
 from reid.utils.serialization import load_checkpoint, save_checkpoint
 
-from reid.utils.data.graph_sampler import GraphSampler
+from reid.utils.data.graph_sampler_half import GraphSampler
 from reid.loss.pairwise_matching_loss import PairwiseMatchingLoss
 from reid.loss.triplet_loss import TripletLoss
 
@@ -35,8 +35,11 @@ import sys
 
 def get_data(dataname, data_dir, model, matcher, save_path, args):
     root = osp.join(data_dir, dataname)
+
     dataset = datasets.create(dataname, root, combine_all=args.combine_all)
+
     num_classes = dataset.num_train_ids
+
     train_transformer = T.Compose([
         T.Resize((args.height, args.width), interpolation=InterpolationMode.BICUBIC),
         T.Pad(10),
@@ -61,7 +64,6 @@ def get_data(dataname, data_dir, model, matcher, save_path, args):
                              args.num_instance,
                              args.test_gal_batch, args.test_prob_batch, save_path, args.gs_verbose),
         pin_memory=True)
-
 
     query_loader = DataLoader(
         Preprocessor(dataset.query,
@@ -105,23 +107,11 @@ def get_test_data(dataname, data_dir, height, width, workers=8, test_batch=64):
 
 def main(args):
     cudnn.deterministic = False
-    cudnn.benchmark = True # faster and less reproducible
-
-    # if args.seed is not None:
-    #     # reproducibility
-    #     # you should set args.seed to None in real application :)
-    #     random.seed(args.seed)
-    #     np.random.seed(args.seed)
-    #     torch.manual_seed(args.seed)
-    #     torch.cuda.manual_seed(args.seed)
-    #     torch.cuda.manual_seed_all(args.seed)
-    #     cudnn.deterministic = True # slower and more reproducible
-    #     cudnn.benchmark = False
-
+    cudnn.benchmark = True
 
     exp_database_dir = osp.join(args.exp_dir, string.capwords(args.dataset))
     output_dir = osp.join(exp_database_dir, args.method, args.sub_method)
-    log_file = osp.join(output_dir, 'log_x.txt')
+    log_file = osp.join(output_dir, 'log.txt')
     # Redirect print to both console and log file
     sys.stdout = Logger(log_file)
 
@@ -134,7 +124,7 @@ def main(args):
                               dim_feedforward=args.dim_feedforward, scale_sizes=args.scale_sizes,
                               neck2 = args.multi_scale_neck).cuda()
 
-    num_features = model.num_features # channel, which equals to neck=512
+    num_features = model.num_features # channle, which equals to neck=512
 
     feamap_factor = {'layer2': 8, 'layer3': 16, 'layer4': 32}
     hei = args.height // feamap_factor[args.final_layer]
@@ -187,11 +177,6 @@ def main(args):
 
     model = nn.DataParallel(model).cuda()
 
-    # Evaluator
-    evaluator = Evaluator(model, matcher)
-
-    test_names = args.testset.strip().split(',')
-
     # Create data loaders
     save_path = None
     if args.gs_save:
@@ -200,7 +185,7 @@ def main(args):
 
     # Decay LR by a factor of 0.1 every step_size epochs
     lr_scheduler = StepLR(optimizer, step_size=args.step_size, gamma=0.1, last_epoch=start_epoch-1)
-    best_ACC = 0.0
+
     if not args.evaluate:
         # Trainer
         trainer = Trainer(model, criterion, args.clip_value)
@@ -216,20 +201,6 @@ def main(args):
             print(
                 '* Finished epoch %d at lr=[%g, %g, %g]. Loss: %.3f. Acc: %.2f%%. Training time: %.0f seconds.                  \n'
                 % (epoch1, lr[0], lr[1], lr[2], loss, acc * 100, train_time))
-
-            # necessary test
-            if (epoch1 - start_epoch) % args.eval_interval == 0:
-                for test_name in test_names:
-                    if test_name not in datasets.names():
-                        print('Unknown dataset: %s.' % test_name)
-                        continue
-
-                    testset, test_query_loader, test_gallery_loader = \
-                        get_test_data(test_name, args.data_dir, args.height, args.width, args.workers, args.test_fea_batch)
-                    test_rank1, test_mAP = evaluator.evaluate(testset, test_query_loader, test_gallery_loader)
-                    acc = (test_rank1 + test_mAP) /2
-                    best_ACC = max(acc, best_ACC)
-                    print('%s: Testing in epoch:%d, rank1=%.1f, mAP=%.1f.\n' % ( test_name, epoch1, test_rank1 * 100, test_mAP * 100))
 
             save_checkpoint({
                 'model': model.module.state_dict(),
@@ -256,8 +227,10 @@ def main(args):
     print('Evaluate the learned model:')
     t0 = time.time()
 
-    # Evaluate
+    # Evaluator
+    evaluator = Evaluator(model, matcher)
 
+    test_names = args.testset.strip().split(',')
     for test_name in test_names:
         if test_name not in datasets.names():
             print('Unknown dataset: %s.' % test_name)
@@ -267,13 +240,12 @@ def main(args):
         testset, test_query_loader, test_gallery_loader = \
             get_test_data(test_name, args.data_dir, args.height, args.width, args.workers, args.test_fea_batch)
 
+        test_rank1, test_mAP =  evaluator.evaluate( testset, test_query_loader, test_gallery_loader)
 
-        test_rank1, test_mAP =  evaluator.evaluate(testset, test_query_loader, test_gallery_loader )
         test_time = time.time() - t1
 
         test_dict = {'test_dataset': test_name, 'rank1': test_rank1, 'mAP': test_mAP, 'test_time': test_time}
         print('  %s: rank1=%.1f, mAP=%.1f.\n' % (test_name, test_rank1 * 100, test_mAP * 100))
-        print("best_mAcc%.1f." % (best_ACC * 100))
 
         with open(json_file, 'a') as f:
             json.dump(test_dict, f)
@@ -312,6 +284,18 @@ if __name__ == '__main__':
     parser.add_argument('--ibn', type=str, choices={'a', 'b', 'none'}, default='b',
                         help="IBN type. Choose from 'a' or 'b'. Default: 'b'")
 
+    # TLift
+    parser.add_argument('--do_tlift', action='store_true', default=False, help="apply TLift, default: False")
+    parser.add_argument('--tau', type=float, default=100,
+                        help="the interval threshold to define nearby persons in TLift, default: 100")
+    parser.add_argument('--sigma', type=float, default=200,
+                        help="the sensitivity parameter of the time difference in TLift, default: 200")
+    parser.add_argument('--K', type=int, default=10,
+                        help="parameter of the top K retrievals used to define the pivot set P in TLift, "
+                             "default: 10")
+    parser.add_argument('--alpha', type=float, default=0.2,
+                        help="regularizer for the multiplication fusion in TLift, default: 0.2")
+
     # random occlusion
     parser.add_argument('--min_size', type=float, default=0, help="minimal size for the random occlusion, default: 0")
     parser.add_argument('--max_size', type=float, default=0.8, help="maximal size for the ramdom occlusion. default: 0.8")
@@ -320,7 +304,6 @@ if __name__ == '__main__':
                         help="Learning rate of the new parameters. For pretrained "
                              "parameters it is 10 times smaller than this. Default: 0.005.")
     # training configurations
-    parser.add_argument('--seed', type=int, default=0) # 42 is the birth of the universe :)
     parser.add_argument('--epochs', type=int, default=15, help="the number of training epochs, default: 15")
     parser.add_argument('--step_size', type=int, default=10, help="step size for the learning rate decay, default: 10")
     parser.add_argument('--resume', type=str, default='', metavar='PATH',
@@ -328,7 +311,6 @@ if __name__ == '__main__':
                              "'ori' (original path), or a real path")
     parser.add_argument('--clip_value', type=float, default=4, help="the gradient clip value, default: 4")
     parser.add_argument('--margin', type=float, default=16, help="margin of the triplet loss, default: 16")
-    parser.add_argument('--eval_interval', type=int, default=1, help="interval epoch of the test, default: 1")
 
     # graph sampler
     parser.add_argument('--QAConv', action='store_true', default=False, help="whether use the setup of QAConv_GS")
@@ -362,9 +344,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--nhead', type=int, default=1,
                         help="the number of heads in the multi-head-attention models (default=1)")
-    parser.add_argument('--num_trans_layers', type=int, default=2,
-                        help="the number of sub-encoder-layers in the encoder (default=2)")
-    parser.add_argument('--dim_feedforward', type=int, default=2048,
+    parser.add_argument('--num_trans_layers', type=int, default=1,
+                        help="the number of sub-encoder-layers in the encoder (default=3)")
+    parser.add_argument('--dim_feedforward', type=int, default=1024,
                         help="the dimension of the feedforward network model (default=2048)")
     parser.add_argument('--scale_sizes', type=str, default="1,3,5",
                         help="the multi-size of s)")
@@ -372,8 +354,10 @@ if __name__ == '__main__':
                         help="whether use transformer encoder")
     parser.add_argument('--use_multi_scale', action='store_true',
                         help="whether use multi-scale template convolutions")
+    parser.add_argument('--use_MLP', action='store_true',
+                        help="whether use MLP")
     parser.add_argument('--multi_scale_neck', type=int, default=512,
-                        help="number of channels for the multi scale neck layer, default: 512")
+                        help="the dimension of the feedforward network model (default=2048)")
     args = parser.parse_args()
 
     if args.QAConv:

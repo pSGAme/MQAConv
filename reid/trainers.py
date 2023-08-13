@@ -14,7 +14,7 @@ class BaseTrainer(object):
         self.criterion = criterion
         self.clip_value = clip_value
 
-    def train(self, epoch, data_loader, optimizer):
+    def train(self, epoch, data_loader, optimizer, train_iters=1600):
         # Creates once at the beginning of training
         scaler = torch.cuda.amp.GradScaler()
 
@@ -24,7 +24,10 @@ class BaseTrainer(object):
         precisions = AverageMeter()
 
         end = time.time()
-        for i, inputs in enumerate(data_loader):
+
+        for i in range(train_iters):
+            inputs = data_loader.next()
+        #for i, inputs in enumerate(data_loader):
             self.model.eval()
             self.criterion.train()
 
@@ -70,7 +73,7 @@ class BaseTrainer(object):
                   'Data: {:.3f} ({:.3f}). '
                   'Loss: {:.3f} ({:.3f}). '
                   'Prec: {:.2%} ({:.2%}).'
-                  .format(epoch + 1, i + 1, len(data_loader),
+                  .format(epoch + 1, i + 1, train_iters,
                           batch_time.val, batch_time.avg,
                           data_time.val, data_time.avg,
                           losses.val, losses.avg,

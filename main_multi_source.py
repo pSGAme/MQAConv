@@ -6,9 +6,9 @@ import time
 import json
 import random
 
+import numpy as np
 import torch
 from torch.backends import cudnn
-import numpy as np
 
 from torch import nn
 from torch.utils.data import DataLoader
@@ -18,8 +18,7 @@ from torch.optim.lr_scheduler import StepLR
 from reid import datasets
 from reid.models import restranmap
 from reid.models.transmatcher import TransMatcher
-from reid.models import resmap
-from reid.models.qaconv import QAConv
+
 from reid.trainers import Trainer
 from reid.evaluators import Evaluator
 from reid.utils.data import transforms as T
@@ -28,10 +27,12 @@ from reid.utils.logging import Logger
 from reid.utils.serialization import load_checkpoint, save_checkpoint
 
 from reid.utils.data.graph_sampler import GraphSampler
+from reid.utils.data.IterLoader import IterLoader
+
 from reid.loss.pairwise_matching_loss import PairwiseMatchingLoss
-from reid.loss.triplet_loss import TripletLoss
 
 import sys
+
 
 def get_data(dataname, data_dir, model, matcher, save_path, args):
     root = osp.join(data_dir, dataname)
@@ -62,6 +63,7 @@ def get_data(dataname, data_dir, model, matcher, save_path, args):
                              args.test_gal_batch, args.test_prob_batch, save_path, args.gs_verbose),
         pin_memory=True)
 
+    train_loader = IterLoader(train_loader, length = args.iters if args.fix_iterations else len(train_loader))
 
     query_loader = DataLoader(
         Preprocessor(dataset.query,
@@ -104,72 +106,60 @@ def get_test_data(dataname, data_dir, height, width, workers=8, test_batch=64):
 
 
 def main(args):
+
+    #0. ==========================misc==========================
     cudnn.deterministic = False
     cudnn.benchmark = True # faster and less reproducible
 
-    # if args.seed is not None:
-    #     # reproducibility
-    #     # you should set args.seed to None in real application :)
-    #     random.seed(args.seed)
-    #     np.random.seed(args.seed)
-    #     torch.manual_seed(args.seed)
-    #     torch.cuda.manual_seed(args.seed)
-    #     torch.cuda.manual_seed_all(args.seed)
-    #     cudnn.deterministic = True # slower and more reproducible
-    #     cudnn.benchmark = False
+    if args.seed is not None:
+        # reproducibility
+        # you should set args.seed to None in real application :)
+        # print("ssss")
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+        cudnn.deterministic = True # slower and more reproducible
+        cudnn.benchmark = False
 
-
-    exp_database_dir = osp.join(args.exp_dir, string.capwords(args.dataset))
-    output_dir = osp.join(exp_database_dir, args.method, args.sub_method)
-    log_file = osp.join(output_dir, 'log_x.txt')
+    exp_database_dir = osp.join(args.exp_dir, args.source_datasets)
+    output_dir = osp.join(exp_database_dir, args.method)
+    log_file = osp.join(output_dir, 'log.txt')
     # Redirect print to both console and log file
+
     sys.stdout = Logger(log_file)
+    for arg in sys.argv:
+        print('%s ' % arg, end='')
+    print('\n')
+    print("logs will be saved to " + log_file)
 
-    # Create model
-    ibn_type = args.ibn
-    if ibn_type == 'none':
-        ibn_type = None
+
+    # 1. ==========================Create model==========================
+
+    # backbone
+    ibn_type = None if args.ibn =="none" else args.ibn
     model = restranmap.create(args.arch, ibn_type=ibn_type, final_layer=args.final_layer, neck=args.neck,
-                              nhead=args.nhead,  num_encoder_layers=args.num_trans_layers,
+                              nhead=args.nhead, num_encoder_layers=args.num_trans_layers,
                               dim_feedforward=args.dim_feedforward, scale_sizes=args.scale_sizes,
-                              neck2 = args.multi_scale_neck).cuda()
+                              neck2=args.multi_scale_neck).cuda()
 
-    num_features = model.num_features # channel, which equals to neck=512
+    num_features = model.num_features  # channel, which equals to neck=512
 
     feamap_factor = {'layer2': 8, 'layer3': 16, 'layer4': 32}
     hei = args.height // feamap_factor[args.final_layer]
     wid = args.width // feamap_factor[args.final_layer]  # 24 * 8
 
     split_layer = [args.neck]
-    if args.scale_sizes!="":
-        split_layer.extend( [args.multi_scale_neck] * len(args.scale_sizes.split(",")) )
+    if args.scale_sizes != "":
+        split_layer.extend([args.multi_scale_neck] * len(args.scale_sizes.split(",")))
     if args.use_transformer:
         split_layer.extend([args.neck])
 
+    # matcher
     matcher = TransMatcher(hei * wid, num_features, split_layer, args.dim_feedforward,
                            use_transformer=args.use_transformer).cuda()
-    for arg in sys.argv:
-        print('%s ' % arg, end='')
-    print('\n')
 
-    # Criterion
-    # if args.QAConv:
-    #     criterion = TripletLoss(matcher, args.margin).cuda()
-    # else:
-    #     criterion = PairwiseMatchingLoss(matcher).cuda()
-    criterion = PairwiseMatchingLoss(matcher).cuda()
-    # Optimizer
-    base_param_ids = set(map(id, model.base.parameters()))
-    new_params = [p for p in model.parameters() if
-                  id(p) not in base_param_ids]
-    param_groups = [
-        {'params': model.base.parameters(), 'lr': 0.1 * args.lr},
-        {'params': new_params, 'lr': args.lr},
-        {'params': matcher.parameters(), 'lr': args.lr}]
-
-    optimizer = torch.optim.SGD(param_groups, lr=args.lr, momentum=0.9, weight_decay=5e-4, nesterov=True)
-
-    # Load from checkpoint
     start_epoch = 0
 
     if args.resume or args.evaluate:
@@ -179,35 +169,77 @@ def main(args):
         else:
             checkpoint = load_checkpoint(osp.join(output_dir, 'checkpoint.pth.tar'))
         model.load_state_dict(checkpoint['model'])
-        criterion.load_state_dict(checkpoint['criterion'])
-        optimizer.load_state_dict(checkpoint['optim'])
+        # criterion.load_state_dict(checkpoint['criterion'])
+        # optimizer.load_state_dict(checkpoint['optim'])
         start_epoch = checkpoint['epoch']
 
         print("=> Start epoch {} ".format(start_epoch))
 
-    model = nn.DataParallel(model).cuda()
+    # model = nn.DataParallel(model).cuda()
 
-    # Evaluator
+
+    #2. ==========================Dataset Settings==========================
+
+    print("========================== ==> Load labeled real-world dataset ==========================")
+    source_datasets = [name.strip() for name in args.source_datasets.split(',')]
+    source_dataloaders = []
+    for source_dataset in source_datasets:
+        dataset, num_classes, train_loader, _, _ = get_data(source_dataset, args.data_dir, model, matcher, None, args)
+        source_dataloaders.append(train_loader)
+    print("========================== ==> Load unseen real-world dataset ==========================")
+
+    testset, test_query_loader, test_gallery_loader = \
+        get_test_data(args.testset, args.data_dir, args.height, args.width, args.workers, args.test_fea_batch)
+
+
+    # 3. ==========================Loss Function==========================
+    criterion = PairwiseMatchingLoss(matcher).cuda()   # criterion = PairwiseMatchingLoss(matcher).cuda()
+
+    # 4. ==========================Optimizer==========================
+    base_param_ids = set(map(id, model.base.parameters()))
+    new_params = [p for p in model.parameters() if
+                  id(p) not in base_param_ids]
+    param_groups = [
+        {'params': model.base.parameters(), 'lr': 0.1 * args.lr},
+        {'params': new_params, 'lr': args.lr},
+        {'params': matcher.parameters(), 'lr': args.lr}]
+    optimizer = torch.optim.SGD(param_groups, lr=args.lr, momentum=0.9, weight_decay=5e-4, nesterov=True)
+
+    # 5. ==========================Load from checkpoint==========================
+    # start_epoch = 0
+    #
+    # if args.resume or args.evaluate:
+    #     print('Loading checkpoint...')
+    #     if args.resume and (args.resume != 'ori'):
+    #         checkpoint = load_checkpoint(args.resume)
+    #     else:
+    #         checkpoint = load_checkpoint(osp.join(output_dir, 'checkpoint.pth.tar'))
+    #     model.load_state_dict(checkpoint['model'])
+    #     criterion.load_state_dict(checkpoint['criterion'])
+    #     optimizer.load_state_dict(checkpoint['optim'])
+    #     start_epoch = checkpoint['epoch']
+    #
+    #     print("=> Start epoch {} ".format(start_epoch))
+    #
+    # model = nn.DataParallel(model).cuda()
+
+    # 6. ==========================Evaluator==========================
     evaluator = Evaluator(model, matcher)
 
-    test_names = args.testset.strip().split(',')
-
-    # Create data loaders
-    save_path = None
-    if args.gs_save:
-        save_path = output_dir
-    dataset, num_classes, train_loader, _, _ = get_data(args.dataset, args.data_dir, model, matcher, save_path, args)
-
+    # 7 . ==========================Training==========================
     # Decay LR by a factor of 0.1 every step_size epochs
     lr_scheduler = StepLR(optimizer, step_size=args.step_size, gamma=0.1, last_epoch=start_epoch-1)
-    best_ACC = 0.0
+    best_mAcc, best_rank1, best_mAP = 0.0, 0.0, 0.0
     if not args.evaluate:
         # Trainer
         trainer = Trainer(model, criterion, args.clip_value)
         t0 = time.time()
         # Start training
         for epoch in range(start_epoch, args.epochs):
-            loss, acc = trainer.train(epoch, train_loader, optimizer)
+            index = epoch % len(source_dataloaders)
+            train_loader = source_dataloaders[index]
+            loss, acc = trainer.train(epoch, train_loader, optimizer,
+                                      args.iters if args.fix_iterations else len(train_loader))
             lr = list(map(lambda group: group['lr'], optimizer.param_groups))
             lr_scheduler.step()
             train_time = time.time() - t0
@@ -219,35 +251,30 @@ def main(args):
 
             # necessary test
             if (epoch1 - start_epoch) % args.eval_interval == 0:
-                for test_name in test_names:
-                    if test_name not in datasets.names():
-                        print('Unknown dataset: %s.' % test_name)
-                        continue
+                rank1, mAP = evaluator.evaluate(testset, test_query_loader, test_gallery_loader)
+                mAcc = (rank1 + mAP) /2
+                best_mAcc, best_rank1, best_mAP =  max(best_mAcc, mAcc), max(best_rank1, rank1), max(best_mAP, mAP)
 
-                    testset, test_query_loader, test_gallery_loader = \
-                        get_test_data(test_name, args.data_dir, args.height, args.width, args.workers, args.test_fea_batch)
-                    test_rank1, test_mAP = evaluator.evaluate(testset, test_query_loader, test_gallery_loader)
-                    acc = (test_rank1 + test_mAP) /2
-                    best_ACC = max(acc, best_ACC)
-                    print('%s: Testing in epoch:%d, rank1=%.1f, mAP=%.1f.\n' % ( test_name, epoch1, test_rank1 * 100, test_mAP * 100))
-
+                print('%s: Testing in epoch:%d, rank1=%.1f, mAP=%.1f, mAcc = %.1f, best_rank1=%.1f, best_mAP=%.1f,'
+                      ' best_mAcc = %.1f.\n' % (args.testset , epoch1, rank1 * 100, mAP * 100, mAcc * 100,
+                                                best_rank1 * 100, best_mAP * 100, best_mAcc * 100))
             save_checkpoint({
-                'model': model.module.state_dict(),
+                'model': model.state_dict(),
                 'criterion': criterion.state_dict(),
                 'optim': optimizer.state_dict(),
                 'epoch': epoch1,
-            }, fpath=osp.join(output_dir, 'checkpoint.pth.tar'))
+            }, fpath=osp.join(output_dir, f'checkpoint_{index}.pth.tar'))
 
     json_file = osp.join(output_dir, 'results.json')
-    
+
     if not args.evaluate:
-        arg_dict = {'train_dataset': args.dataset, 'exp_dir': args.exp_dir, 'method': args.method, 'sub_method': args.sub_method}
+        arg_dict = {'train_dataset': args.source_datasets, 'exp_dir': args.exp_dir, 'method': args.method}
         with open(json_file, 'a') as f:
             f.write("===================================================================================================")
             f.write('\n')
             json.dump(arg_dict, f)
             f.write('\n')
-        train_dict = {'train_dataset': args.dataset, 'loss': loss, 'acc': acc, 'epochs': epoch1, 'train_time': train_time}
+        train_dict = {'train_dataset':args.source_datasets, 'loss': loss, 'acc': acc, 'epochs': epoch1, 'train_time': train_time}
         with open(json_file, 'a') as f:
             json.dump(train_dict, f)
             f.write('\n')
@@ -255,29 +282,24 @@ def main(args):
     # Final test
     print('Evaluate the learned model:')
     t0 = time.time()
-
-    # Evaluate
-
-    for test_name in test_names:
-        if test_name not in datasets.names():
-            print('Unknown dataset: %s.' % test_name)
-            continue
-
-        t1 = time.time()
-        testset, test_query_loader, test_gallery_loader = \
-            get_test_data(test_name, args.data_dir, args.height, args.width, args.workers, args.test_fea_batch)
+    test_name = args.testset
 
 
-        test_rank1, test_mAP =  evaluator.evaluate(testset, test_query_loader, test_gallery_loader )
-        test_time = time.time() - t1
+    t1 = time.time()
+    testset, test_query_loader, test_gallery_loader = \
+        get_test_data(test_name, args.data_dir, args.height, args.width, args.workers, args.test_fea_batch)
 
-        test_dict = {'test_dataset': test_name, 'rank1': test_rank1, 'mAP': test_mAP, 'test_time': test_time}
-        print('  %s: rank1=%.1f, mAP=%.1f.\n' % (test_name, test_rank1 * 100, test_mAP * 100))
-        print("best_mAcc%.1f." % (best_ACC * 100))
 
-        with open(json_file, 'a') as f:
-            json.dump(test_dict, f)
-            f.write('\n')
+    test_rank1, test_mAP =  evaluator.evaluate(testset, test_query_loader, test_gallery_loader )
+    test_time = time.time() - t1
+
+    test_dict = {'test_dataset': test_name, 'rank1': test_rank1, 'mAP': test_mAP, 'test_time': test_time}
+    print('  %s: rank1=%.1f, mAP=%.1f.\n' % (test_name, test_rank1 * 100, test_mAP * 100))
+
+
+    with open(json_file, 'a') as f:
+        json.dump(test_dict, f)
+        f.write('\n')
 
     test_time = time.time() - t0
 
@@ -292,11 +314,11 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="QAConv_MS")
     # data
-    parser.add_argument('-d', '--dataset', type=str, default='market1501', choices=datasets.names(),
+    parser.add_argument('-d', '--source_datasets', type=str, default='market1501,msmt17,dukemtmc', choices=datasets.names(),
                         help="the training dataset")
     parser.add_argument('--combine_all', action='store_true', default=False,
                         help="combine all data for training, default: False")
-    parser.add_argument('--testset', type=str, default='cuhk03_np,msmt17', help="the test datasets")
+    parser.add_argument('--testset', type=str, default='cuhk03_np', help="the test datasets")
     parser.add_argument('-b', '--batch-size', type=int, default=64, help="the batch size, default: 64")
     parser.add_argument('-j', '--workers', type=int, default=8,
                         help="the number of workers for the dataloader, default: 8")
@@ -320,9 +342,12 @@ if __name__ == '__main__':
                         help="Learning rate of the new parameters. For pretrained "
                              "parameters it is 10 times smaller than this. Default: 0.005.")
     # training configurations
+    parser.add_argument('--fix_iterations', action='store_true',
+                        help="whether to fix the iterations per epoch")
+    parser.add_argument('--iters', type=int, default=1600, help="iterations per epoch")
     parser.add_argument('--seed', type=int, default=0) # 42 is the birth of the universe :)
-    parser.add_argument('--epochs', type=int, default=15, help="the number of training epochs, default: 15")
-    parser.add_argument('--step_size', type=int, default=10, help="step size for the learning rate decay, default: 10")
+    parser.add_argument('--epochs', type=int, default=80, help="the number of training epochs, default: 15")
+    parser.add_argument('--step_size', type=int, default=20, help="step size for the learning rate decay, default: 10")
     parser.add_argument('--resume', type=str, default='', metavar='PATH',
                         help="Path for resuming training. Choices: '' (new start, default), "
                              "'ori' (original path), or a real path")
@@ -354,9 +379,9 @@ if __name__ == '__main__':
                         help="the path to the image data")
     parser.add_argument('--exp-dir', type=str, metavar='PATH', default=osp.join(working_dir, 'Exp'),
                         help="the path to the output directory")
-    parser.add_argument('--method', type=str, default='TransMatcher', help="method name for the output directory")
-    parser.add_argument('--sub_method', type=str, default='res50-ibnb-layer3',
-                        help="sub method name for the output directory")
+    parser.add_argument('--method', type=str, default='MQAConv', help="method name for the output directory")
+    # parser.add_argument('--sub_method', type=str, default='res50-ibnb-layer3',
+    #                     help="sub method name for the output directory")
     parser.add_argument('--save_score', default=False, action='store_true',
                         help="save the matching score or not, default: False")
 
@@ -366,7 +391,7 @@ if __name__ == '__main__':
                         help="the number of sub-encoder-layers in the encoder (default=2)")
     parser.add_argument('--dim_feedforward', type=int, default=2048,
                         help="the dimension of the feedforward network model (default=2048)")
-    parser.add_argument('--scale_sizes', type=str, default="1,3,5",
+    parser.add_argument('--scale_sizes', type=str, default="1,3,5,7",
                         help="the multi-size of s)")
     parser.add_argument('--use_transformer', action='store_true',
                         help="whether use transformer encoder")
