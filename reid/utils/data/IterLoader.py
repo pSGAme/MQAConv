@@ -8,8 +8,8 @@ class IterLoader:
         self.iter = None
 
     def __len__(self):
-        # if self.length is not None:
-        #     return self.length
+        if self.length is not None:
+            return self.length
         return len(self.loader)
 
     def new_epoch(self):

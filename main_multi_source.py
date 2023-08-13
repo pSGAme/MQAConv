@@ -4,8 +4,9 @@ import os.path as osp
 import string
 import time
 import json
+import random
 
-
+import numpy as np
 import torch
 from torch.backends import cudnn
 
@@ -62,6 +63,8 @@ def get_data(dataname, data_dir, model, matcher, save_path, args):
                              args.test_gal_batch, args.test_prob_batch, save_path, args.gs_verbose),
         pin_memory=True)
 
+    train_loader = IterLoader(train_loader, length = args.iters if args.fix_iterations else len(train_loader))
+
     query_loader = DataLoader(
         Preprocessor(dataset.query,
                      root=osp.join(dataset.images_dir, dataset.query_path), transform=test_transformer),
@@ -107,19 +110,22 @@ def main(args):
     #0. ==========================misc==========================
     cudnn.deterministic = False
     cudnn.benchmark = True # faster and less reproducible
-    # if args.seed is not None:
-    #     # reproducibility
-    #     # you should set args.seed to None in real application :)
-    #     random.seed(args.seed)
-    #     np.random.seed(args.seed)
-    #     torch.manual_seed(args.seed)
-    #     torch.cuda.manual_seed(args.seed)
-    #     torch.cuda.manual_seed_all(args.seed)
-    #     cudnn.deterministic = True # slower and more reproducible
-    #     cudnn.benchmark = False
+
+    if args.seed is not None:
+        # reproducibility
+        # you should set args.seed to None in real application :)
+        # print("ssss")
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+        cudnn.deterministic = True # slower and more reproducible
+        cudnn.benchmark = False
+
     exp_database_dir = osp.join(args.exp_dir, args.source_datasets)
-    output_dir = osp.join(exp_database_dir, args.method, args.sub_method)
-    log_file = osp.join(output_dir, 'log_x.txt')
+    output_dir = osp.join(exp_database_dir, args.method)
+    log_file = osp.join(output_dir, 'log.txt')
     # Redirect print to both console and log file
 
     sys.stdout = Logger(log_file)
@@ -232,7 +238,8 @@ def main(args):
         for epoch in range(start_epoch, args.epochs):
             index = epoch % len(source_dataloaders)
             train_loader = source_dataloaders[index]
-            loss, acc = trainer.train(epoch, train_loader, optimizer)
+            loss, acc = trainer.train(epoch, train_loader, optimizer,
+                                      args.iters if args.fix_iterations else len(train_loader))
             lr = list(map(lambda group: group['lr'], optimizer.param_groups))
             lr_scheduler.step()
             train_time = time.time() - t0
@@ -261,13 +268,13 @@ def main(args):
     json_file = osp.join(output_dir, 'results.json')
 
     if not args.evaluate:
-        arg_dict = {'train_dataset': args.source_dataset, 'exp_dir': args.exp_dir, 'method': args.method, 'sub_method': args.sub_method}
+        arg_dict = {'train_dataset': args.source_datasets, 'exp_dir': args.exp_dir, 'method': args.method}
         with open(json_file, 'a') as f:
             f.write("===================================================================================================")
             f.write('\n')
             json.dump(arg_dict, f)
             f.write('\n')
-        train_dict = {'train_dataset':args.source_dataset, 'loss': loss, 'acc': acc, 'epochs': epoch1, 'train_time': train_time}
+        train_dict = {'train_dataset':args.source_datasets, 'loss': loss, 'acc': acc, 'epochs': epoch1, 'train_time': train_time}
         with open(json_file, 'a') as f:
             json.dump(train_dict, f)
             f.write('\n')
@@ -335,6 +342,9 @@ if __name__ == '__main__':
                         help="Learning rate of the new parameters. For pretrained "
                              "parameters it is 10 times smaller than this. Default: 0.005.")
     # training configurations
+    parser.add_argument('--fix_iterations', action='store_true',
+                        help="whether to fix the iterations per epoch")
+    parser.add_argument('--iters', type=int, default=1600, help="iterations per epoch")
     parser.add_argument('--seed', type=int, default=0) # 42 is the birth of the universe :)
     parser.add_argument('--epochs', type=int, default=80, help="the number of training epochs, default: 15")
     parser.add_argument('--step_size', type=int, default=20, help="step size for the learning rate decay, default: 10")
@@ -370,8 +380,8 @@ if __name__ == '__main__':
     parser.add_argument('--exp-dir', type=str, metavar='PATH', default=osp.join(working_dir, 'Exp'),
                         help="the path to the output directory")
     parser.add_argument('--method', type=str, default='MQAConv', help="method name for the output directory")
-    parser.add_argument('--sub_method', type=str, default='res50-ibnb-layer3',
-                        help="sub method name for the output directory")
+    # parser.add_argument('--sub_method', type=str, default='res50-ibnb-layer3',
+    #                     help="sub method name for the output directory")
     parser.add_argument('--save_score', default=False, action='store_true',
                         help="save the matching score or not, default: False")
 
@@ -381,7 +391,7 @@ if __name__ == '__main__':
                         help="the number of sub-encoder-layers in the encoder (default=2)")
     parser.add_argument('--dim_feedforward', type=int, default=2048,
                         help="the dimension of the feedforward network model (default=2048)")
-    parser.add_argument('--scale_sizes', type=str, default="1,3,5",
+    parser.add_argument('--scale_sizes', type=str, default="1,3,5,7",
                         help="the multi-size of s)")
     parser.add_argument('--use_transformer', action='store_true',
                         help="whether use transformer encoder")

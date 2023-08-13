@@ -62,6 +62,7 @@ def get_data(dataname, data_dir, model, matcher, save_path, args):
                              args.test_gal_batch, args.test_prob_batch, save_path, args.gs_verbose),
         pin_memory=True)
 
+
     query_loader = DataLoader(
         Preprocessor(dataset.query,
                      root=osp.join(dataset.images_dir, dataset.query_path), transform=test_transformer),

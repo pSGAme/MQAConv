@@ -3,7 +3,7 @@ import os.path as osp
 from glob import glob
 import re
 import sys
-print(sys.path)
+
 #root = /data1/ckx/data/cuhk03_np
 from QAConv.reid.datasets import  create
 
